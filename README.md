@@ -2,51 +2,57 @@
 [![rank](https://make.fun/badge/best-card-game-20261122-1826/rrmmllnn/best-card-game-20261122-1826/rank.svg)](https://make.fun/bounty/best-card-game-20261122-1826/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=best-card-game-20261122-1826)
 [![reward](https://make.fun/badge/best-card-game-20261122-1826/rrmmllnn/best-card-game-20261122-1826/reward.svg)](https://make.fun/bounty/best-card-game-20261122-1826?utm_source=github&utm_medium=readme&utm_campaign=best-card-game-20261122-1826)
 
-An entry for the [make.fun competition "Make the best card game"](https://make.fun/bounty/best-card-game-20261122-1826).
+[Best card game — best-card-game-20261122-1826](https://make.fun/bounty/best-card-game-20261122-1826)
 
 # Lantern Duel
 
-A complete, original card duel for the make.fun **best-card-game-20261122-1826** bounty. Two lanterns, four factions, one table — played with mouse and keyboard in a desktop browser, fully offline.
+A complete, original card duel in a desktop browser — fully offline, mouse + keyboard, no build step, no network.
 
-## The game
+Two lanterns, 30 life each. You are the **Lantern Keeper**, duelling the AI **Marina, Keeper of Tides**. Each turn you gain +1 mana crystal (up to 10), refill your mana and draw a card from your 30-card deck. Play creatures onto your side, cast spells, then attack: click a glowing creature, then an enemy creature or Marina's lantern. Creatures trade blows; a lantern takes damage directly. Reduce Marina's lantern to 0 to win. An empty deck burns you — fatigue 1, then 2, then 3… Creatures have summoning sickness and cannot attack the turn they are played.
 
-You are the Lantern Keeper, duelling **Marina, Keeper of Tides**. Both lanterns start at **30 life**. Each turn you gain +1 mana crystal (up to 10), refill your mana, and draw a card from your 30-card deck. Play creatures onto your side of the table, cast spells, then attack: click a glowing creature, then an enemy creature or Marina's lantern. Creatures trade blows; a lantern takes damage straight. Reduce Marina's lantern to 0 to win. An empty deck burns you — fatigue 1, then 2, then 3…
+## The four factions
 
-Four factions, told apart by colour **and** glyph:
+Factions are told apart by colour **and** glyph, never colour alone:
 
-- 🔥 **Ember** (red) — hits hard, dies fast
-- 🌊 **Tide** (blue) — steady and even-tempered
-- 🌿 **Grove** (green) — tough, and it mends
-- ✨ **Star** (gold) — draws cards, strikes from afar
+- 🔥 **Ember** (red) — hits hard, dies fast.
+- 💧 **Tide** (blue) — steady and even-tempered.
+- 🍃 **Grove** (green) — tough, and it mends your lantern when played.
+- ⭐ **Star** (gold) — draws cards, and its creatures strike from afar (Ranged: they take no damage back).
 
-Spells include Ember Burst (3 damage), Star Bolt (4 damage), Tide Surge (draw 2), Grove Mend (heal 6) and Lantern Flare (2 damage to every enemy creature). Marina is a readable opponent: she takes lethal when she sees it, trades up when a creature dies for free, mends when low, and draws when her hand runs dry.
+## The 23 cards
 
-## Controls
+18 creatures across the four factions, plus all five spells:
 
-- **Click** a hand card to play it (damage spells ask you to pick a target)
-- **Click** your glowing creature, then an enemy creature or Marina's lantern, to attack
-- **1–7** play a hand card · **Enter** ends your turn · **Esc** cancels a selection · **R** restarts after a game ends · **M** mutes
+- **Ember Burst** (2 mana) — deal 3 damage to a creature or lantern.
+- **Star Bolt** (3 mana) — deal 4 damage to a creature or lantern.
+- **Tide Surge** (2 mana) — draw 2 cards.
+- **Grove Mend** (2 mana) — heal your lantern for 6.
+- **Lantern Flare** (4 mana) — deal 2 damage to every enemy creature.
 
-## Files
+## Marina, the AI
 
-- `game/index.html` — the page; `game/styles.css` — the table
-- `game/src/cards.js` — the card pool and the four factions
-- `game/src/game.js` — the rules engine (pure state, no DOM)
-- `game/src/ai.js` — Marina's decisions
-- `game/src/render.js` — the table, drawn as DOM
-- `game/src/audio.js` — synthesised WebAudio sounds, no files
-- `game/src/shots.js` — the `?shot=` screenshot scenes
-- `game/src/rng.js` — seeded shuffle · `game/src/main.js` — clicks, keys, turns
-- `main.ts` — hands the entry in (copies `game/` + `screenshots/`, writes `dossier.json`)
+She takes lethal when she sees it, trades up when a creature dies for free, mends when her lantern runs low, and draws when her hand runs dry.
 
 ## Play it
 
 ```sh
-node serve.ts        # then open http://localhost:8080
+node serve.ts
+# open http://localhost:8080
 ```
 
-Screenshot scenes: `?shot=title|table|win|loss&seed=7` (see `shots.json`).
+Keys: `1–9` play a card from hand · `Enter` ends the turn · `Esc` cancels a selection. Mouse: click a card, then its target.
+
+## Layout
+
+- `main.ts` — the hand-in: copies `game/` + `screenshots/` to `/output` and writes `dossier.json` (run with `MAKEFUN_OUTPUT_DIR=out node main.ts`).
+- `game/index.html` + `game/src/` — the game itself: `config.js` (tuning), `random.js` (seeded RNG), `cards.js` (the 23 cards), `engine.js` (the rules, no DOM), `ai.js` (Marina), `render.js` (the table), `input.js` (mouse + keyboard), `shots.js` (staged screenshot scenes), `main.js` (boot + controller), `style.css` (the table).
+- `screenshots/` — 4 real renders of the game in headless Chrome at 1280×800: title, table, win, loss.
+- `tests/engine.test.mjs` — the engine test suite (`node --test tests/`).
+
+## Screenshots
+
+The game stages its own screenshot scenes deterministically: `?shot=title|table|win|loss&seed=N` plays the real rules forward from a seeded shuffle (see `shots.json`).
 
 ## License
 
-MIT — see `LICENSE`.
+MIT — see [LICENSE](LICENSE).
