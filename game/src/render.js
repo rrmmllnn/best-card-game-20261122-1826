@@ -1,193 +1,208 @@
-// Lantern Duel's table: every pixel the player sees, drawn as DOM so the
-// cards stay legible at thumbnail size. One render pass rebuilds the table
-// from the game state; clicks are delegated from #app and answered in main.js.
-import { CARD_BY_ID, FACTIONS } from './cards.js';
+// Lantern Duel — the table, painted as DOM. Every re-render rebuilds the
+// dynamic regions from the engine state, so what the player sees is always
+// exactly what the rules say. Clicks are handled by delegation in input.js,
+// so rebuilding never drops a listener.
+import { CARD_BY_ID } from './cards.js';
+import { FACTIONS, RULES } from './config.js';
+import { ENEMY, PLAYER, attackBlockReason, isOver, playBlockReason, readyAttackers } from './engine.js';
 
-const GLYPH_SWORD = '⚔';
-const GLYPH_HEART = '❤';
-const GLYPH_MANA = '◆';
-
-function factionClass(faction) {
-  return `faction-${faction}`;
+function esc(text) {
+  return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function manaPips(side) {
-  let pips = '';
-  for (let i = 0; i < 10; i += 1) {
-    pips += `<span class="pip${i < side.mana ? ' full' : ''}${i < side.manaCrystals ? '' : ' empty'}">${GLYPH_MANA}</span>`;
-  }
-  return `<span class="mana" title="Mana ${side.mana}/${side.manaCrystals}">${pips}<b>${side.mana}/${side.manaCrystals}</b></span>`;
+function factionGlyph(def) {
+  return FACTIONS[def.faction].glyph;
 }
 
-function heroHtml(game, which) {
-  const side = which === 'you' ? game.you : game.foe;
-  const isTarget = game.selectedAttacker >= 0 && which === 'foe';
-  const isSpellTarget = game.selectedHand >= 0 && which === 'foe';
-  const targetable = (isTarget || isSpellTarget) && game.phase === 'play' && game.active === 'you';
-  const low = side.life <= 10 ? ' low' : '';
-  return `<button class="hero${low}${targetable ? ' targetable' : ''}" data-hero="${which}" aria-label="${side.name} lantern, ${side.life} life">
-    <span class="hero-face">${which === 'you' ? '🏮' : '🧜'}</span>
-    <span class="hero-name">${side.name}</span>
-    <span class="hero-title">${side.title}</span>
-    <span class="hero-life">${GLYPH_HEART} ${side.life}</span>
-  </button>`;
-}
-
-/** A card in the hand: full art, cost gem, glyph, name, rules text, stats. */
-export function handCardHtml(game, cardId, index) {
-  const card = CARD_BY_ID[cardId];
-  const side = game.you;
-  const playable = game.phase === 'play' && game.active === 'you' && card.cost <= side.mana
-    && (card.kind === 'spell' || side.field.length < 6);
-  const selected = game.selectedHand === index;
-  const stats = card.kind === 'creature'
-    ? `<span class="stat atk">${GLYPH_SWORD} ${card.attack}</span><span class="stat hp">${GLYPH_HEART} ${card.health}</span>`
+/** One card face: cost gem, faction banner, art glyph, rules text, stats. */
+export function cardFace(def, opts = {}) {
+  const faction = FACTIONS[def.faction];
+  // NOTE: the size class must not be 'hand' or 'board' — those are the
+  // container classes, and a card wearing one inherits the row's flex layout.
+  const sizeClass = opts.size === 'board' ? 'size-board' : 'size-hand';
+  const cls = [
+    'card',
+    `fac-${def.faction}`,
+    sizeClass,
+    opts.playable ? 'playable' : '',
+    opts.selected ? 'selected' : '',
+    opts.canAttack ? 'can-attack' : '',
+    opts.sick ? 'sick' : '',
+  ].filter(Boolean).join(' ');
+  const stats = def.kind === 'creature'
+    ? `<span class="stat atk" title="Attack">⚔️ ${opts.attack ?? def.attack}</span><span class="stat hp" title="Health">❤️ ${opts.health ?? def.health}</span>`
     : `<span class="stat spell-tag">SPELL</span>`;
-  return `<button class="card ${factionClass(card.faction)}${playable ? ' playable' : ' unplayable'}${selected ? ' selected' : ''}"
-      data-hand="${index}" aria-label="${card.name}, cost ${card.cost}">
-    <span class="cost">${card.cost}</span>
-    <span class="glyph" style="color:${FACTIONS[card.faction].colour}">${FACTIONS[card.faction].glyph}</span>
-    <span class="card-name">${card.name}</span>
-    <span class="card-text">${card.text}</span>
-    ${stats}
-  </button>`;
-}
-
-/** A creature standing on the table: compact, with live attack and health. */
-function fieldCardHtml(game, creature, owner) {
-  const card = CARD_BY_ID[creature.cardId];
-  const mine = owner === 'you';
-  const myTurn = game.phase === 'play' && game.active === 'you';
-  const ready = mine && myTurn && creature.canAttack;
-  const selected = game.selectedAttacker === creature.uid;
-  const hurt = creature.health < creature.maxHealth;
-  const targetable = !mine && game.selectedAttacker >= 0 && myTurn;
-  return `<button class="card field-card ${factionClass(card.faction)}${ready ? ' ready' : ''}${selected ? ' selected' : ''}${targetable ? ' targetable' : ''}${creature.canAttack ? '' : ' sleeping'}"
-      data-field="${owner}:${creature.uid}" aria-label="${creature.name}, attack ${creature.attack}, health ${creature.health}">
-    <span class="cost">${card.cost}</span>
-    <span class="glyph" style="color:${FACTIONS[card.faction].colour}">${FACTIONS[card.faction].glyph}</span>
-    <span class="card-name">${creature.name}</span>
-    <span class="stat atk">${GLYPH_SWORD} ${creature.attack}</span>
-    <span class="stat hp${hurt ? ' hurt' : ''}">${GLYPH_HEART} ${creature.health}</span>
-  </button>`;
-}
-
-function cardBackHtml() {
-  return `<div class="card card-back" aria-hidden="true"><span class="back-glyph">🏮</span><span class="back-text">LANTERN<br>DUEL</span></div>`;
-}
-
-function renderTitle(game) {
-  return `<div class="overlay title-screen">
-    <div class="title-panel">
-      <div class="title-lanterns">🏮&nbsp;🔥&nbsp;🌊&nbsp;🌿&nbsp;✨</div>
-      <h1>LANTERN<br>DUEL</h1>
-      <p class="tagline">Four lanterns. One table. Outlast Marina, Keeper of Tides.</p>
-      <div class="rules">
-        <div><b>❤ 30 life</b> — reduce Marina's lantern to 0 to win.</div>
-        <div><b>◆ Mana</b> — gain +1 crystal each turn; cards cost mana to play.</div>
-        <div><b>⚔ Attack</b> — click your glowing creature, then an enemy creature or her lantern.</div>
-        <div><b>🔥 🌊 🌿 ✨</b> — Ember hits hard, Tide holds steady, Grove mends, Star draws.</div>
-        <div><b>Keys</b> — 1–7 play a hand card · Enter ends your turn · Esc cancels.</div>
-        <div>Marina moves second, so she opens with an extra card and a Lantern Coin.</div>
-      </div>
-      <button class="big-button" id="play-button">Light the Lanterns — Play</button>
-      <p class="fine">A complete card duel: 30-card decks, mana, creatures, spells, fatigue. No luck but the draw.</p>
-    </div>
+  const keywords = [];
+  if (def.ranged) keywords.push('Ranged');
+  if (def.mend) keywords.push(`Mend ${def.mend}`);
+  if (def.draw) keywords.push(`Draw ${def.draw}`);
+  return `<div class="${cls}" data-uid="${opts.uid ?? ''}" data-def="${def.id}" title="${esc(def.name)} — ${esc(def.text)}">
+    <span class="cost" title="Mana cost">◆ ${def.cost}</span>
+    <span class="faction">${faction.glyph} ${faction.name}</span>
+    <span class="art" aria-hidden="true">${faction.glyph}</span>
+    <span class="name">${esc(def.name)}</span>
+    <span class="rules">${keywords.length ? `<b>${keywords.join(' · ')}</b><br>` : ''}${esc(def.text)}</span>
+    <span class="stats">${stats}</span>
   </div>`;
 }
 
-function renderEnd(game) {
-  const won = game.winner === 'you';
-  return `<div class="overlay end-screen ${won ? 'win' : 'loss'}">
-    <div class="end-panel">
-      <div class="end-glyph">${won ? '🏆' : '🌑'}</div>
-      <h1>${won ? 'VICTORY!' : 'DEFEAT'}</h1>
-      <p class="end-line">${won
-    ? 'Marina’s lantern goes dark. The four lanterns are yours, Keeper.'
-    : 'Your lantern goes dark. Marina keeps the tides — this time.'}</p>
-      <div class="end-stats">
-        <div><span>Turns</span><b>${game.stats.turnsPlayed}</b></div>
-        <div><span>Cards played</span><b>${game.stats.cardsPlayed}</b></div>
-        <div><span>Damage dealt</span><b>${game.stats.damageDealt}</b></div>
-        <div><span>Your life</span><b>${game.you.life}</b></div>
-        <div><span>Marina's life</span><b>${game.foe.life}</b></div>
-      </div>
-      <button class="big-button" id="again-button">Play Again</button>
-      <p class="fine">Press R to shuffle a new game.</p>
-    </div>
+function cardBack(index) {
+  return `<div class="card back" data-index="${index}" title="Marina's card"><span class="art">🏮</span><span class="name">Marina</span></div>`;
+}
+
+function manaPips(crystals, mana) {
+  let pips = '';
+  for (let i = 0; i < RULES.maxManaCrystals; i += 1) {
+    if (i < mana) pips += '<span class="pip lit">◆</span>';
+    else if (i < crystals) pips += '<span class="pip spent">◆</span>';
+    else pips += '<span class="pip empty">◇</span>';
+  }
+  return `<span class="pips">${pips}</span><span class="mana-num">${mana}/${crystals} mana</span>`;
+}
+
+function lanternHtml(side, who) {
+  const pct = Math.max(0, Math.round((side.lantern / RULES.maxLantern) * 100));
+  return `<div class="lantern ${who}" data-lantern="${who}">
+    <span class="lantern-icon" aria-hidden="true">🏮</span>
+    <span class="lantern-life">${side.lantern}</span>
+    <span class="lantern-bar"><span style="width:${pct}%"></span></span>
+    <span class="lantern-name">${esc(side.name)}</span>
   </div>`;
 }
 
-/** Rebuild the whole table from `game`. Call after every move. */
-export function render(game) {
-  const app = document.getElementById('app');
-  const foe = game.foe;
-  const you = game.you;
-  const myTurn = game.phase === 'play' && game.active === 'you';
-  const pill = game.phase === 'title' ? 'Title'
-    : game.phase === 'over' ? 'Game over'
-    : `Turn ${game.turn} · ${myTurn ? 'Your turn' : 'Marina’s turn'}`;
-  const prompt = game.winner
-    ? (game.winner === 'you' ? 'Victory is yours!' : 'Marina takes this one.')
-    : myTurn
-      ? 'Your turn — play a card, attack, or end your turn.'
-      : 'Marina is thinking…';
-  const lastLog = game.log[game.log.length - 1] || '';
+export function createRenderer(stage) {
+  const foeBar = stage.querySelector('#foe-bar');
+  const foeBoard = stage.querySelector('#foe-board');
+  const midBar = stage.querySelector('#mid-bar');
+  const myBoard = stage.querySelector('#my-board');
+  const myHand = stage.querySelector('#my-hand');
+  const myBar = stage.querySelector('#my-bar');
+  const overlay = stage.querySelector('#overlay');
 
-  let foeHand = '';
-  for (let i = 0; i < foe.hand.length; i += 1) foeHand += cardBackHtml();
+  function draw(state, ui) {
+    const you = state.players[PLAYER];
+    const foe = state.players[ENEMY];
+    const yourTurn = state.turnPlayer === PLAYER && !isOver(state);
 
-  let foeField = foe.field.map((c) => fieldCardHtml(game, c, 'foe')).join('');
-  if (!foeField) foeField = '<div class="field-empty">Marina’s side of the table is empty.</div>';
-  let youField = you.field.map((c) => fieldCardHtml(game, c, 'you')).join('');
-  if (!youField) youField = '<div class="field-empty">Your creatures will stand here.</div>';
-
-  app.innerHTML = `
-  <header class="topbar">
-    <div class="brand">🏮 LANTERN DUEL</div>
-    <div class="turn-pill">${pill}</div>
-    <div class="top-actions">
-      <button id="mute-button" class="small-button" aria-label="Toggle sound">🔊 Sound</button>
-      <button id="restart-button" class="small-button" aria-label="Restart game">↻ Restart</button>
-    </div>
-  </header>
-  <section class="side foe-side">
-    <div class="side-info">
-      ${heroHtml(game, 'foe')}
-      <div class="side-meta">${manaPips(foe)}<span class="deck">🂠 Deck ${foe.deck.length}</span></div>
-    </div>
-    <div class="side-table">
-      <div class="hand foe-hand" aria-label="Marina's hand">${foeHand}</div>
-      <div class="field foe-field">${foeField}</div>
-    </div>
-  </section>
-  <div class="midbar">
-    <span class="prompt">${prompt}</span>
-    <span class="log-line">${lastLog}</span>
-  </div>
-  <section class="side you-side">
-    <div class="side-table">
-      <div class="field you-field">${youField}</div>
-      <div class="hand you-hand" aria-label="Your hand">
-        ${you.hand.map((cardId, i) => handCardHtml(game, cardId, i)).join('') || '<div class="field-empty">Your hand is empty — draw!</div>'}
+    // --- Opponent bar: lantern, mana, deck, face-down hand ---
+    foeBar.innerHTML = `
+      ${lanternHtml(foe, 'foe')}
+      <div class="bar-mid">${manaPips(foe.manaCrystals, foe.mana)}</div>
+      <div class="bar-right">
+        <span class="deck" title="Cards left in Marina's deck">🂠 Deck ${foe.deck.length}</span>
+        <span class="hand-count" title="Cards in Marina's hand">✋ ${foe.hand.length}</span>
+        <span class="fatigue" title="Fatigue damage if Marina draws from an empty deck">${foe.fatigue > 0 ? `Fatigue ${foe.fatigue}` : ''}</span>
       </div>
-    </div>
-    <div class="side-info">
-      ${heroHtml(game, 'you')}
-      <div class="side-meta">${manaPips(you)}<span class="deck">🂠 Deck ${you.deck.length}</span></div>
-      <button id="end-turn" class="end-turn${myTurn ? '' : ' disabled'}" ${myTurn ? '' : 'disabled'}>End Turn ⏎</button>
-    </div>
-  </section>
-  ${game.phase === 'title' ? renderTitle(game) : ''}
-  ${game.phase === 'over' ? renderEnd(game) : ''}`;
+      <div class="foe-hand">${foe.hand.map((_, i) => cardBack(i)).join('')}</div>`;
 
-  // A hero that just took a hit flashes once (skipped in screenshot mode).
-  const event = game.lastEvent;
-  if (event && event.kind === 'hero-hit' && !document.body.classList.contains('shot-mode')) {
-    const hero = app.querySelector(`[data-hero="${event.side}"]`);
-    if (hero) {
-      hero.classList.add('hit-flash');
-      window.setTimeout(() => hero.classList.remove('hit-flash'), 450);
+    // --- Opponent board ---
+    foeBoard.innerHTML = foe.board.length === 0
+      ? '<div class="board-empty">Marina has no creatures — her side of the table is bare.</div>'
+      : foe.board.map((m) => {
+        const def = CARD_BY_ID[m.defId];
+        return cardFace(def, { size: 'board', uid: m.uid, attack: m.attack, health: m.health, sick: m.sick });
+      }).join('');
+
+    // --- Middle bar: turn banner, latest events, End Turn ---
+    const banner = isOver(state)
+      ? (state.winner === PLAYER ? '🏮 Your lantern still burns — you win!' : '🌊 Marina’s tide has drowned your flame.')
+      : yourTurn
+        ? (ui.targeting ? `Choose a target for ${esc(CARD_BY_ID[ui.targetingDef].name)} — click an enemy creature or lantern, or Esc to cancel.`
+          : ui.selectedAttackerUid ? 'Choose a target — click an enemy creature or Marina’s lantern.'
+          : 'Your turn — play cards, then attack. Click a glowing creature, then its target.')
+        : 'Marina is thinking…';
+    const logLines = state.log.slice(-3).map((line) => `<div>${esc(line)}</div>`).join('');
+    midBar.innerHTML = `
+      <div class="banner">${banner}</div>
+      <div class="log">${logLines}</div>
+      <button id="end-turn" ${yourTurn ? '' : 'disabled'}>End Turn ⏎</button>`;
+
+    // --- Your board ---
+    const ready = new Set(readyAttackers(state, PLAYER).map((m) => m.uid));
+    myBoard.innerHTML = you.board.length === 0
+      ? '<div class="board-empty">Your side of the table is bare — play a creature.</div>'
+      : you.board.map((m) => {
+        const def = CARD_BY_ID[m.defId];
+        return cardFace(def, {
+          size: 'board',
+          uid: m.uid,
+          attack: m.attack,
+          health: m.health,
+          sick: m.sick,
+          canAttack: yourTurn && ready.has(m.uid),
+          selected: ui.selectedAttackerUid === m.uid,
+        });
+      }).join('');
+
+    // --- Your hand ---
+    myHand.innerHTML = you.hand.map((card, index) => {
+      const def = CARD_BY_ID[card.defId];
+      const playable = yourTurn && !playBlockReason(state, PLAYER, card.uid);
+      return cardFace(def, {
+        size: 'hand',
+        uid: card.uid,
+        playable,
+        selected: ui.selectedHandUid === card.uid,
+      }).replace('data-uid=', `data-index="${index + 1}" data-uid=`);
+    }).join('') || '<div class="board-empty">Your hand is empty — draw and endure.</div>';
+
+    // --- Your bar: lantern, mana, deck, buttons ---
+    myBar.innerHTML = `
+      ${lanternHtml(you, 'me')}
+      <div class="bar-mid">${manaPips(you.manaCrystals, you.mana)}</div>
+      <div class="bar-right">
+        <span class="deck" title="Cards left in your deck">🂠 Deck ${you.deck.length}</span>
+        <span class="fatigue" title="Fatigue damage if you draw from an empty deck">${you.fatigue > 0 ? `Fatigue ${you.fatigue}` : ''}</span>
+        <span class="turn-count">Turn ${state.turn}</span>
+        <button id="help-btn" type="button">How to play</button>
+        <button id="restart-btn" type="button">Restart</button>
+      </div>`;
+
+    drawOverlay(state, ui);
+  }
+
+  function drawOverlay(state, ui) {
+    if (ui.screen === 'title') {
+      overlay.innerHTML = `<div class="panel title-panel">
+        <div class="title-glyph">🏮 🔥 💧 🍃 ⭐</div>
+        <h1>Lantern Duel</h1>
+        <p class="tagline">Two lanterns. Thirty lives. One keeper walks away.</p>
+        <p>You are the <b>Lantern Keeper</b>, duelling <b>Marina, Keeper of Tides</b>.
+        Each turn you gain a mana crystal, refill your mana and draw a card.
+        Play creatures, cast spells, then attack — shatter her lantern before she shatters yours.
+        An empty deck burns you: fatigue 1, then 2, then 3…</p>
+        <div class="factions">
+          ${Object.values(FACTIONS).map((f) => `<span><b>${f.glyph} ${f.name}</b> — ${f.text}</span>`).join('')}
+        </div>
+        <p class="keys">Mouse: click a card, then its target · Keys: 1–9 play a card · Enter ends the turn · Esc cancels</p>
+        <button id="begin-btn" type="button">Begin the Duel</button>
+        <p class="fine">23 cards · 4 factions · 5 spells · fully offline, no account, no network</p>
+      </div>`;
+      overlay.classList.add('show');
+    } else if (ui.screen === 'win' || ui.screen === 'loss') {
+      const won = ui.screen === 'win';
+      overlay.innerHTML = `<div class="panel end-panel ${won ? 'won' : 'lost'}">
+        <div class="end-glyph">${won ? '🏮' : '🌊'}</div>
+        <h1>${won ? 'Victory!' : 'Defeat'}</h1>
+        <p class="tagline">${won ? 'Your lantern still burns. Marina bows, and the tide goes out.' : 'Marina’s tide has drowned your flame. Her lantern burns on.'}</p>
+        <p>${esc(state.winReason)} The duel lasted ${state.turn} turn${state.turn === 1 ? '' : 's'}.
+        Your lantern stood at ${state.players[PLAYER].lantern} — Marina’s at ${state.players[ENEMY].lantern}.</p>
+        <button id="again-btn" type="button">Duel Again</button>
+      </div>`;
+      overlay.classList.add('show');
+    } else {
+      overlay.innerHTML = '';
+      overlay.classList.remove('show');
     }
   }
+
+  function toast(message) {
+    const node = stage.querySelector('#toast');
+    node.textContent = message;
+    node.classList.add('show');
+    window.clearTimeout(toast.timer);
+    toast.timer = window.setTimeout(() => node.classList.remove('show'), 2200);
+  }
+
+  return { draw, toast };
 }

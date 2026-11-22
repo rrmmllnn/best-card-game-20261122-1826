@@ -1,118 +1,90 @@
-// Screenshot scenes for ?shot=title|table|win|loss. Each one plays the real
-// rules forward from a fresh game with a seeded autopilot, so every frame is
-// what a short real game looks like and the same seed always gives the same
-// frame. The table scene stops mid-game; win and loss play to the end.
-import { CARD_BY_ID } from './cards.js';
-import { attack, canAttackWith, canPlayCard, createGame, endTurn, playCard, startGame } from './game.js';
-import { takeAiTurn } from './ai.js';
+// Lantern Duel — the staged scenes behind ?shot=title|table|win|loss.
+// Each one plays the real rules forward from a fresh game, so the frame is
+// what a real game looks like, and the same seed always gives the same frame.
+// The win scene is a smart Keeper against a careless Marina; the loss scene
+// is the reverse — a real game, played badly on one side.
+import { createGame, endTurn, isOver, playCard, attack, PLAYER, ENEMY } from './engine.js';
+import { planPlayAction, planAttackAction } from './ai.js';
 
-function cardValue(game, side, cardId) {
-  const card = CARD_BY_ID[cardId];
-  const foe = side === game.you ? game.foe : game.you;
-  if (card.kind === 'spell') {
-    if (card.effect === 'coin') return side.manaCrystals <= 4 ? 55 : 8;
-    if (card.effect === 'heal6') return side.life <= 18 ? 100 : 10;
-    if (card.effect === 'draw2') return side.hand.length <= 2 ? 60 : 10;
-    if (card.effect === 'flare2') return foe.field.length >= 2 ? 70 : 5;
-    if (card.effect === 'damage3' || card.effect === 'damage4') {
-      return foe.life <= (card.effect === 'damage3' ? 3 : 4) ? 120 : 25;
-    }
-    return 10;
-  }
-  return (card.attack * 2 + card.health) * 4 - card.cost;
+export function applyAction(state, player, action) {
+  if (action.type === 'play') return playCard(state, player, action.handUid, action.target ?? null);
+  return attack(state, player, action.uid, action.target);
 }
 
-function damageTarget(game, side, amount) {
-  const foe = side === game.you ? game.foe : game.you;
-  if (foe.life <= amount) return { kind: 'hero', side: side === game.you ? 'foe' : 'you' };
-  let best = null;
-  for (const creature of foe.field) {
-    if (creature.health <= amount && (!best || creature.attack > best.attack)) best = creature;
-  }
-  if (best) return { kind: 'creature', side: side === game.you ? 'foe' : 'you', uid: best.uid };
-  return { kind: 'hero', side: side === game.you ? 'foe' : 'you' };
-}
-
-/** One side's turn, played by a simple heuristic autopilot. `passive` plays
- * nothing and attacks nothing — used to steer a loss scene after a board
- * has been built. */
-export function autopilotTurn(game, side, skill, passive) {
-  if (passive) return;
+/** Play one whole turn for `player`, instantly, with a guard against loops. */
+export function runTurnInstant(state, player, style) {
   let guard = 0;
-  while (guard < 20 && !game.winner) {
+  let action = planPlayAction(state, player, style);
+  while (action && !isOver(state) && guard < 40) {
     guard += 1;
-    let bestIndex = -1;
-    let bestValue = 0;
-    for (let i = 0; i < side.hand.length; i += 1) {
-      if (!canPlayCard(game, side, i)) continue;
-      const value = cardValue(game, side, side.hand[i]);
-      if (value > bestValue) {
-        bestValue = value;
-        bestIndex = i;
-      }
-    }
-    if (bestIndex < 0 || bestValue < 8) break;
-    const card = CARD_BY_ID[side.hand[bestIndex]];
-    let target = null;
-    if (card.effect === 'damage3' || card.effect === 'damage4') {
-      target = damageTarget(game, side, card.effect === 'damage3' ? 3 : 4);
-    }
-    if (!playCard(game, side, bestIndex, target)) break;
+    if (!applyAction(state, player, action)) break;
+    action = planPlayAction(state, player, style);
   }
-  const foe = side === game.you ? game.foe : game.you;
-  for (const creature of side.field.filter((c) => c.canAttack)) {
-    if (game.winner) return;
-    if (!canAttackWith(game, side, creature.uid)) continue;
-    let target = { kind: 'hero', side: side === game.you ? 'foe' : 'you' };
-    if (foe.life > creature.attack) {
-      let prey = null;
-      for (const enemy of foe.field) {
-        if (enemy.health <= creature.attack && enemy.attack < creature.health) {
-          if (!prey || enemy.attack > prey.attack) prey = enemy;
-        }
-      }
-      if (prey && skill >= 0.3) target = { kind: 'creature', side: side === game.you ? 'foe' : 'you', uid: prey.uid };
-    }
-    attack(game, side, creature.uid, target);
+  guard = 0;
+  let strike = planAttackAction(state, player, style);
+  while (strike && !isOver(state) && guard < 20) {
+    guard += 1;
+    if (!applyAction(state, player, strike)) break;
+    strike = planAttackAction(state, player, style);
+  }
+}
+
+/** Play until the duel ends (fatigue always ends it) or the turn cap hits. */
+export function playFullGame(state, playerStyle, foeStyle, maxTurns = 60) {
+  while (!isOver(state) && state.turn <= maxTurns) {
+    const player = state.turnPlayer;
+    runTurnInstant(state, player, player === PLAYER ? playerStyle : foeStyle);
+    if (isOver(state)) break;
+    endTurn(state);
+  }
+  return state.winner;
+}
+
+/** Play `halfTurns` half-turns (one side's turn each), stopping early if over. */
+function playHalfTurns(state, halfTurns, playerStyle, foeStyle) {
+  for (let i = 0; i < halfTurns && !isOver(state); i += 1) {
+    const player = state.turnPlayer;
+    runTurnInstant(state, player, player === PLAYER ? playerStyle : foeStyle);
+    if (isOver(state)) break;
+    endTurn(state);
   }
 }
 
 /**
- * Drive `game` to the named scene and return it. `seed` fixes the shuffle.
- * title: a fresh table behind the title overlay.
- * table: five turns in, both fields busy, your turn to move.
- * win: you beat Marina. loss: Marina beats you.
+ * Stage the named scene and return the state plus the screen to draw over it.
+ * Any other name stages the title.
  */
 export function stageShot(name, seed) {
-  const game = createGame(seed);
-  if (name === 'title') return game;
-  startGame(game);
-  const playerSkill = name === 'loss' ? 0.1 : 0.8;
-  const foeSkill = name === 'loss' ? 0.9 : 0.2;
-  let rounds = 0;
-  while (!game.winner && rounds < 60) {
-    if (game.active === 'you') {
-      // The table scene stops the moment your turn begins: full mana, a
-      // bright playable hand, both fields already busy.
-      if (name === 'table' && game.turn >= 5) break;
-      // In a loss scene you play the opening, then go quiet and let Marina
-      // grind your lantern down — a real loss, not a forfeit.
-      const passive = name === 'loss' && game.turn > 6;
-      autopilotTurn(game, game.you, playerSkill, passive);
-      if (game.winner) break;
-      endTurn(game);
-    } else {
-      takeAiTurn(game, foeSkill);
-      if (game.winner) break;
-      endTurn(game);
-      rounds += 1;
+  if (name === 'table') {
+    const state = createGame(seed);
+    // A mid-game table: both sides have creatures, the Keeper holds cards,
+    // and it is the Keeper's turn with mana to spend.
+    let guard = 0;
+    while (!isOver(state) && guard < 24) {
+      guard += 1;
+      playHalfTurns(state, 1, 'smart', 'smart');
+      const you = state.players[PLAYER];
+      const foe = state.players[ENEMY];
+      if (
+        state.turn >= 4
+        && state.turnPlayer === PLAYER
+        && you.board.length > 0
+        && foe.board.length > 0
+        && you.hand.length >= 3
+      ) break;
     }
-    // A stalled duel still has to end for the win/loss scenes: leave the
-    // loser one lantern-point from dark and let the next attack land it.
-    if ((name === 'win' || name === 'loss') && rounds === 30 && !game.winner) {
-      if (name === 'win') game.foe.life = 1;
-      else game.you.life = 1;
-    }
+    return { state, screen: isOver(state) ? (state.winner === PLAYER ? 'win' : 'loss') : 'play' };
   }
-  return game;
+  if (name === 'win') {
+    const state = createGame(seed);
+    playFullGame(state, 'smart', 'dumb');
+    return { state, screen: state.winner === PLAYER ? 'win' : 'loss' };
+  }
+  if (name === 'loss') {
+    const state = createGame(seed);
+    playFullGame(state, 'dumb', 'smart');
+    return { state, screen: state.winner === ENEMY ? 'loss' : 'win' };
+  }
+  const state = createGame(seed);
+  return { state, screen: 'title' };
 }

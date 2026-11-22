@@ -1,242 +1,310 @@
-// Lantern Duel's wiring: clicks, keys, the animated Marina turn, and the
-// ?shot= scenes for screenshots. All rules live in game.js; this file only
-// translates gestures into moves and re-renders the table after each one.
+// Lantern Duel — boot and the one controller: input becomes engine calls,
+// the engine answers, and the renderer paints what is there. Marina's turn
+// runs the same planners the screenshot scenes use, one action at a time
+// with a pause between them so the player can watch her think.
+//
+// ?seed=N fixes the shuffle. ?shot=title|table|win|loss stages that scene
+// instead of running the loop, paints it twice and sets window.__shotReady
+// for a screenshot. ?selftest=1 plays a whole duel headlessly and writes
+// the result into the page, so a smoke test can read it back.
 import { CARD_BY_ID } from './cards.js';
-import { aiAttack, aiPlayCards } from './ai.js';
-import { attack, canAttackWith, canPlayCard, createGame, endTurn, playCard, startGame } from './game.js';
-import { render } from './render.js';
-import { playAttackSound, playCardSound, playClick, playHurtSound, playLoseSound, playWinSound, toggleMute, unlockAudio } from './audio.js';
-import { stageShot } from './shots.js';
+import { ENEMY, PLAYER, attack, attackBlockReason, createGame, endTurn, isOver, playBlockReason, playCard } from './engine.js';
+import { createRenderer } from './render.js';
+import { createInput } from './input.js';
+import { applyAction, playFullGame, stageShot } from './shots.js';
+import { planAttackAction, planPlayAction } from './ai.js';
 
-let game = createGame((Math.random() * 2147483647) | 0);
-let aiBusy = false;
+const params = new URLSearchParams(window.location.search);
+const shot = params.get('shot');
+const selftest = params.get('selftest') === '1';
+const uitest = params.get('uitest') === '1';
+const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
+const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
 
-function isDamageSpell(cardId) {
-  const card = CARD_BY_ID[cardId];
-  return card && card.kind === 'spell' && (card.effect === 'damage3' || card.effect === 'damage4');
+const stage = document.getElementById('stage');
+const renderer = createRenderer(stage);
+
+let state = createGame(seed);
+let ui = freshUi('title');
+let busy = false;
+
+function freshUi(screen) {
+  return { screen, selectedHandUid: null, selectedAttackerUid: null, targeting: null, targetingDef: null };
 }
 
-function clearSelection() {
-  game.selectedHand = -1;
-  game.selectedAttacker = -1;
+const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+function refresh() {
+  renderer.draw(state, ui);
 }
 
-function afterMove() {
-  render(game);
-  if (game.winner) {
-    if (game.winner === 'you') playWinSound();
-    else playLoseSound();
+function checkOver() {
+  if (!isOver(state)) return;
+  ui.screen = state.winner === PLAYER ? 'win' : 'loss';
+  ui.selectedHandUid = null;
+  ui.selectedAttackerUid = null;
+  ui.targeting = null;
+  refresh();
+}
+
+function cancelSelection() {
+  ui.selectedHandUid = null;
+  ui.selectedAttackerUid = null;
+  ui.targeting = null;
+  ui.targetingDef = null;
+}
+
+function onHandCard(handUid) {
+  if (busy || isOver(state) || ui.screen !== 'play') return;
+  const card = state.players[PLAYER].hand.find((c) => c.uid === handUid);
+  if (!card) return;
+  const def = CARD_BY_ID[card.defId];
+  const blocked = playBlockReason(state, PLAYER, handUid);
+  if (blocked) {
+    renderer.toast(blocked);
+    return;
   }
+  if (def.kind === 'spell' && def.target === 'enemy') {
+    ui.selectedHandUid = handUid;
+    ui.targeting = { handUid };
+    ui.targetingDef = def.id;
+    ui.selectedAttackerUid = null;
+    refresh();
+    return;
+  }
+  cancelSelection();
+  playCard(state, PLAYER, handUid, null);
+  checkOver();
+  refresh();
 }
 
-/** Marina's turn, played out where the player can watch: cards, a beat, attacks. */
-function runAiTurn() {
-  if (aiBusy || game.phase !== 'play' || game.active !== 'foe' || game.winner) return;
-  aiBusy = true;
-  aiPlayCards(game, 0.8);
-  playCardSound();
-  render(game);
-  window.setTimeout(() => {
-    if (game.winner) {
-      aiBusy = false;
-      afterMove();
-      return;
+function onMyMinion(uid) {
+  if (busy || isOver(state) || ui.screen !== 'play') return;
+  if (ui.targeting) return; // spells never target your own side.
+  const blocked = attackBlockReason(state, PLAYER, uid);
+  if (blocked) {
+    renderer.toast(blocked);
+    return;
+  }
+  ui.selectedAttackerUid = ui.selectedAttackerUid === uid ? null : uid;
+  ui.selectedHandUid = null;
+  refresh();
+}
+
+function onFoeMinion(uid) {
+  if (busy || isOver(state) || ui.screen !== 'play') return;
+  if (ui.targeting) {
+    const handUid = ui.targeting.handUid;
+    cancelSelection();
+    playCard(state, PLAYER, handUid, { type: 'creature', player: ENEMY, uid });
+    checkOver();
+    refresh();
+    return;
+  }
+  if (ui.selectedAttackerUid === null) {
+    renderer.toast('Choose one of your glowing creatures first, then its target.');
+    return;
+  }
+  const attacker = ui.selectedAttackerUid;
+  cancelSelection();
+  attack(state, PLAYER, attacker, { type: 'creature', player: ENEMY, uid });
+  checkOver();
+  refresh();
+}
+
+function onFoeLantern() {
+  if (busy || isOver(state) || ui.screen !== 'play') return;
+  if (ui.targeting) {
+    const handUid = ui.targeting.handUid;
+    cancelSelection();
+    playCard(state, PLAYER, handUid, { type: 'lantern', player: ENEMY });
+    checkOver();
+    refresh();
+    return;
+  }
+  if (ui.selectedAttackerUid === null) {
+    renderer.toast('Choose one of your glowing creatures first, then Marina’s lantern.');
+    return;
+  }
+  const attacker = ui.selectedAttackerUid;
+  cancelSelection();
+  attack(state, PLAYER, attacker, { type: 'lantern', player: ENEMY });
+  checkOver();
+  refresh();
+}
+
+async function runAiTurn() {
+  busy = true;
+  refresh();
+  await sleep(650);
+  let action = planPlayAction(state, ENEMY, 'smart');
+  while (action && !isOver(state)) {
+    applyAction(state, ENEMY, action);
+    refresh();
+    await sleep(600);
+    action = planPlayAction(state, ENEMY, 'smart');
+  }
+  let strike = planAttackAction(state, ENEMY, 'smart');
+  while (strike && !isOver(state)) {
+    applyAction(state, ENEMY, strike);
+    refresh();
+    await sleep(650);
+    strike = planAttackAction(state, ENEMY, 'smart');
+  }
+  if (!isOver(state)) {
+    endTurn(state);
+    refresh();
+  }
+  busy = false;
+  checkOver();
+  refresh();
+}
+
+async function onEndTurn() {
+  if (busy || isOver(state) || ui.screen !== 'play' || state.turnPlayer !== PLAYER) return;
+  cancelSelection();
+  endTurn(state);
+  refresh();
+  await runAiTurn();
+}
+
+function newDuel() {
+  state = createGame(Math.floor(Math.random() * 4294967296));
+  ui = freshUi('play');
+  busy = false;
+  refresh();
+}
+
+createInput(stage, {
+  onHandCard,
+  onMyMinion,
+  onFoeMinion,
+  onFoeLantern,
+  onEndTurn,
+  onBegin: () => {
+    ui.screen = 'play';
+    refresh();
+  },
+  onPlayAgain: () => newDuel(),
+  onRestart: () => newDuel(),
+  onHelp: () => {
+    ui.screen = 'title';
+    refresh();
+  },
+  onCancel: () => {
+    cancelSelection();
+    refresh();
+  },
+  onConfirm: () => {
+    if (ui.screen === 'title') {
+      ui.screen = 'play';
+      refresh();
+    } else if (ui.screen === 'win' || ui.screen === 'loss') {
+      newDuel();
+    } else {
+      void onEndTurn();
     }
-    aiAttack(game, 0.8);
-    if (game.lastEvent && game.lastEvent.kind === 'attack') playAttackSound();
-    if (game.lastEvent && game.lastEvent.kind === 'hero-hit') playHurtSound();
-    render(game);
-    window.setTimeout(() => {
-      aiBusy = false;
-      if (!game.winner) endTurn(game);
-      afterMove();
-    }, 650);
-  }, 750);
+  },
+  onHandNumber: (digit) => {
+    const card = state.players[PLAYER].hand[digit - 1];
+    if (card) onHandCard(card.uid);
+  },
+});
+
+function runShot(name) {
+  const staged = stageShot(name, seed);
+  state = staged.state;
+  ui = freshUi(staged.screen);
+  refresh();
+  let painted = 0;
+  function paint() {
+    renderer.draw(state, ui);
+    painted += 1;
+    if (painted < 2) requestAnimationFrame(paint);
+    else window.__shotReady = true;
+  }
+  requestAnimationFrame(paint);
 }
 
-function endYourTurn() {
-  if (game.phase !== 'play' || game.active !== 'you' || game.winner || aiBusy) return;
-  clearSelection();
-  playClick();
-  endTurn(game);
-  render(game);
-  window.setTimeout(runAiTurn, 500);
+function runSelftest() {
+  const result = document.getElementById('selftest');
+  try {
+    const testState = createGame(seed);
+    const winner = playFullGame(testState, 'smart', 'smart');
+    const text = `SELFTEST winner=${winner === PLAYER ? 'player' : 'marina'} turns=${testState.turn} ` +
+      `playerLantern=${testState.players[PLAYER].lantern} marinaLantern=${testState.players[ENEMY].lantern} ` +
+      `logLines=${testState.log.length} errors=0`;
+    result.textContent = text;
+    document.title = text;
+  } catch (error) {
+    const text = `SELFTEST errors=1 ${String(error && error.message ? error.message : error)}`;
+    result.textContent = text;
+    document.title = text;
+  }
+  window.__shotReady = true;
 }
 
-function playHandCard(index) {
-  if (game.phase !== 'play' || game.active !== 'you' || game.winner || aiBusy) return;
-  if (!canPlayCard(game, game.you, index)) return;
-  const cardId = game.you.hand[index];
-  if (isDamageSpell(cardId)) {
-    game.selectedHand = game.selectedHand === index ? -1 : index;
-    game.selectedAttacker = -1;
-    playClick();
-    render(game);
-    return;
-  }
-  clearSelection();
-  if (playCard(game, game.you, index, null)) {
-    playCardSound();
-    afterMove();
-  }
-}
-
-function clickField(owner, uid) {
-  if (game.phase !== 'play' || game.active !== 'you' || game.winner || aiBusy) return;
-  if (owner === 'you') {
-    if (!canAttackWith(game, game.you, uid)) return;
-    game.selectedAttacker = game.selectedAttacker === uid ? -1 : uid;
-    game.selectedHand = -1;
-    playClick();
-    render(game);
-    return;
-  }
-  // An enemy creature: the target of an attack or a damage spell.
-  if (game.selectedAttacker >= 0) {
-    const attacker = game.selectedAttacker;
-    clearSelection();
-    if (attack(game, game.you, attacker, { kind: 'creature', side: 'foe', uid })) {
-      playAttackSound();
-      afterMove();
+/**
+ * Drive the real UI in the browser: click Begin, play every playable card,
+ * attack with every ready creature, end the turn, and let Marina answer —
+ * until the duel ends. It exercises the same delegated click handlers a
+ * player uses, so a pass means a full game can be played to a win or a loss
+ * without errors. Reports into #selftest and the page title.
+ */
+async function runUiTest() {
+  const result = document.getElementById('selftest');
+  try {
+    refresh(); // paint the title screen, so its Begin button exists to click.
+    document.getElementById('begin-btn').click();
+    await sleep(100);
+    let rounds = 0;
+    while (!isOver(state) && rounds < 40) {
+      rounds += 1;
+      for (let i = 0; i < 12 && !isOver(state); i += 1) {
+        const card = document.querySelector('#my-hand .card.playable');
+        if (!card) break;
+        card.click();
+        await sleep(60);
+        if (ui.targeting) {
+          // A targeted spell: aim it at Marina's lantern.
+          document.querySelector('[data-lantern="foe"]').click();
+          await sleep(60);
+        }
+      }
+      for (let i = 0; i < 10 && !isOver(state); i += 1) {
+        const attacker = document.querySelector('#my-board .card.can-attack');
+        if (!attacker) break;
+        attacker.click();
+        await sleep(60);
+        document.querySelector('[data-lantern="foe"]').click();
+        await sleep(60);
+      }
+      if (isOver(state)) break;
+      const endTurnButton = document.getElementById('end-turn');
+      if (endTurnButton && !endTurnButton.disabled) endTurnButton.click();
+      for (let w = 0; w < 200 && busy; w += 1) await sleep(100);
+      await sleep(100);
     }
-  } else if (game.selectedHand >= 0) {
-    const index = game.selectedHand;
-    clearSelection();
-    if (playCard(game, game.you, index, { kind: 'creature', side: 'foe', uid })) {
-      playCardSound();
-      afterMove();
-    }
+    const text = `UITEST winner=${isOver(state) ? (state.winner === PLAYER ? 'player' : 'marina') : 'none'} ` +
+      `rounds=${rounds} turns=${state.turn} ` +
+      `playerLantern=${state.players[PLAYER].lantern} marinaLantern=${state.players[ENEMY].lantern} ` +
+      `logLines=${state.log.length} errors=0`;
+    result.textContent = text;
+    document.title = text;
+  } catch (error) {
+    const text = `UITEST errors=1 ${String(error && error.message ? error.message : error)}`;
+    result.textContent = text;
+    document.title = text;
   }
+  window.__shotReady = true;
 }
 
-function clickHero(which) {
-  if (game.phase !== 'play' || game.active !== 'you' || game.winner || aiBusy) return;
-  if (which !== 'foe') {
-    clearSelection();
-    render(game);
-    return;
-  }
-  if (game.selectedAttacker >= 0) {
-    const attacker = game.selectedAttacker;
-    clearSelection();
-    if (attack(game, game.you, attacker, { kind: 'hero', side: 'foe' })) {
-      playAttackSound();
-      playHurtSound();
-      afterMove();
-    }
-  } else if (game.selectedHand >= 0) {
-    const index = game.selectedHand;
-    clearSelection();
-    if (playCard(game, game.you, index, { kind: 'hero', side: 'foe' })) {
-      playCardSound();
-      afterMove();
-    }
-  }
+if (selftest) {
+  runSelftest();
+} else if (uitest) {
+  void runUiTest();
+} else if (shot) {
+  runShot(shot);
+} else {
+  refresh();
 }
-
-function newGame() {
-  game = createGame((Math.random() * 2147483647) | 0);
-  aiBusy = false;
-  clearSelection();
-  render(game);
-}
-
-function startPlaying() {
-  unlockAudio();
-  startGame(game);
-  playCardSound();
-  render(game);
-}
-
-function onClick(event) {
-  const target = event.target.closest('[data-hand], [data-field], [data-hero], #play-button, #again-button, #end-turn, #mute-button, #restart-button');
-  if (!target) return;
-  if (target.id === 'play-button') {
-    startPlaying();
-    return;
-  }
-  if (target.id === 'again-button') {
-    newGame();
-    startPlaying();
-    return;
-  }
-  if (target.id === 'restart-button') {
-    newGame();
-    return;
-  }
-  if (target.id === 'mute-button') {
-    unlockAudio();
-    const muted = toggleMute();
-    target.textContent = muted ? '🔇 Muted' : '🔊 Sound';
-    return;
-  }
-  if (target.id === 'end-turn') {
-    endYourTurn();
-    return;
-  }
-  if (target.hasAttribute('data-hand')) {
-    playHandCard(Number(target.getAttribute('data-hand')));
-    return;
-  }
-  if (target.hasAttribute('data-field')) {
-    const [owner, uid] = target.getAttribute('data-field').split(':');
-    clickField(owner, Number(uid));
-    return;
-  }
-  if (target.hasAttribute('data-hero')) {
-    clickHero(target.getAttribute('data-hero'));
-  }
-}
-
-function onKey(event) {
-  if (event.key === 'Escape') {
-    clearSelection();
-    render(game);
-    return;
-  }
-  if (event.key === 'Enter' || event.key === ' ') {
-    if (game.phase === 'title') {
-      startPlaying();
-      return;
-    }
-    if (game.phase === 'over') {
-      newGame();
-      startPlaying();
-      return;
-    }
-    endYourTurn();
-    return;
-  }
-  if (event.key === 'r' || event.key === 'R') {
-    if (game.phase === 'over') {
-      newGame();
-      startPlaying();
-    }
-    return;
-  }
-  if (event.key === 'm' || event.key === 'M') {
-    toggleMute();
-    render(game);
-    return;
-  }
-  const digit = Number(event.key);
-  if (digit >= 1 && digit <= 7) playHandCard(digit - 1);
-}
-
-function boot() {
-  const params = new URLSearchParams(window.location.search);
-  const shot = params.get('shot');
-  if (shot) {
-    document.body.classList.add('shot-mode');
-    const seed = Number(params.get('seed') || '7');
-    game = stageShot(shot, Number.isFinite(seed) ? seed : 7);
-    render(game);
-    document.title = `Lantern Duel — ${shot}`;
-    return;
-  }
-  document.getElementById('app').addEventListener('click', onClick);
-  window.addEventListener('keydown', onKey);
-  render(game);
-}
-
-boot();

@@ -1,103 +1,141 @@
-// Marina's brain: a readable opponent, not a random one. She plays her
-// cheapest creatures first, spends removal on the biggest threat, mends when
-// her lantern is low, draws when her hand runs dry — then attacks: she takes
-// lethal when she sees it, trades up when a creature dies for free, and
-// otherwise goes for the lantern. `skill` (0..1) blurs her choices so the
-// screenshot games can be steered toward a win or a loss.
+// Marina's brain — and the two autopilots the screenshot scenes use.
+// Every planner returns ONE next action (or null when it is done) and never
+// changes the state, so the UI can apply actions one at a time with a pause
+// between them while the headless scenes apply them instantly.
+//
+// Marina is readable and competent: she takes lethal when she sees it, trades
+// up when a creature dies for free, mends when low, and draws when her hand
+// runs dry. The 'dumb' autopilot plays the first card it can afford and only
+// ever trades for free — it is how a loss (or a win) is staged honestly:
+// a real game, played badly.
 import { CARD_BY_ID } from './cards.js';
-import { attack, canAttackWith, canPlayCard, playCard } from './game.js';
+import { ENEMY, PLAYER, other, playBlockReason, readyAttackers, totalAttack } from './engine.js';
 
-function handValue(game, side, cardId, skill) {
-  const card = CARD_BY_ID[cardId];
-  const foe = side === game.you ? game.foe : game.you;
-  if (card.kind === 'spell') {
-    if (card.effect === 'coin') return side.manaCrystals <= 4 ? 55 : 8;
-    if (card.effect === 'heal6') return side.life <= 18 ? 100 : side.life <= 25 ? 40 : 5;
-    if (card.effect === 'draw2') return side.hand.length <= 2 ? 60 : 10;
-    if (card.effect === 'flare2') return foe.field.length >= 2 ? 70 : 5;
-    if (card.effect === 'damage3' || card.effect === 'damage4') {
-      return foe.life <= (card.effect === 'damage3' ? 3 : 4) ? 120 : 30;
-    }
-    return 10;
-  }
-  // Creatures: value grows with stats per mana, and a full field is worthless.
-  return (card.attack * 2 + card.health) * 4 - card.cost + (skill >= 0.5 ? 0 : -20);
+function handOf(state, player) {
+  return state.players[player].hand;
 }
 
-function bestDamageTarget(game, side, amount) {
-  const foe = side === game.you ? game.foe : game.you;
-  if (foe.life <= amount) return { kind: 'hero', side: side === game.you ? 'foe' : 'you' };
+function findInHand(state, player, defId) {
+  return handOf(state, player).find((c) => c.defId === defId) ?? null;
+}
+
+function spellDamageInHand(state, player) {
+  let total = 0;
+  const side = state.players[player];
+  for (const card of side.hand) {
+    const def = CARD_BY_ID[card.defId];
+    if (def.effect === 'burst' && side.mana >= def.cost) total += 3;
+    if (def.effect === 'bolt' && side.mana >= def.cost) total += 4;
+  }
+  return total;
+}
+
+function creatureScore(def, state, player) {
+  let score = def.attack + def.health;
+  if (def.ranged) score += 1;
+  if (def.draw) score += 2;
+  if (def.mend && state.players[player].lantern <= 20) score += 1.5;
+  if (def.mend) score += 0.5;
+  return score;
+}
+
+/** The next card Marina should play, or null when she is done playing. */
+export function planPlayAction(state, player, style = 'smart') {
+  const side = state.players[player];
+  const foe = state.players[other(player)];
+  const affordable = (card) => CARD_BY_ID[card.defId].cost <= side.mana;
+
+  if (style === 'dumb') {
+    const first = side.hand.find((card) => {
+      const def = CARD_BY_ID[card.defId];
+      return def.kind === 'creature' && affordable(card) && !playBlockReason(state, player, card.uid);
+    });
+    return first ? { type: 'play', handUid: first.uid, target: null } : null;
+  }
+
+  // Mend when low: a lantern at 12 or less is one bad turn from dead.
+  const mend = findInHand(state, player, 'grove-mend');
+  if (mend && affordable(mend) && side.lantern <= 12) {
+    return { type: 'play', handUid: mend.uid, target: null };
+  }
+
+  // Draw when the hand runs dry.
+  const surge = findInHand(state, player, 'tide-surge');
+  if (surge && affordable(surge) && side.hand.length <= 2) {
+    return { type: 'play', handUid: surge.uid, target: null };
+  }
+
+  // Lethal in hand: burn spells at the lantern when attacks finish the job.
+  const burn = side.hand.find((card) => {
+    const def = CARD_BY_ID[card.defId];
+    return (def.effect === 'burst' || def.effect === 'bolt') && affordable(card);
+  });
+  if (burn && totalAttack(state, player) + spellDamageInHand(state, player) >= foe.lantern) {
+    return { type: 'play', handUid: burn.uid, target: { type: 'lantern', player: other(player) } };
+  }
+
+  // Removal: kill the most dangerous enemy creature a spell can finish.
+  const threats = [...foe.board].sort((a, b) => b.attack - a.attack);
+  for (const card of side.hand) {
+    const def = CARD_BY_ID[card.defId];
+    if (!affordable(card)) continue;
+    if (def.effect === 'burst' || def.effect === 'bolt') {
+      const damage = def.effect === 'burst' ? 3 : 4;
+      const prey = threats.find((m) => m.attack >= 4 && m.health <= damage)
+        ?? threats.find((m) => m.health <= damage && m.attack >= 3);
+      if (prey) return { type: 'play', handUid: card.uid, target: { type: 'creature', player: other(player), uid: prey.uid } };
+    }
+    if (def.effect === 'flare' && foe.board.length >= 2) {
+      const kills = foe.board.filter((m) => m.health <= 2).length;
+      if (kills >= 1 || foe.board.length >= 3) {
+        return { type: 'play', handUid: card.uid, target: null };
+      }
+    }
+  }
+
+  // Otherwise play the best creature the mana allows.
   let best = null;
-  for (const creature of foe.field) {
-    if (creature.health <= amount && (!best || creature.attack > best.attack)) best = creature;
+  let bestScore = -1;
+  for (const card of side.hand) {
+    const def = CARD_BY_ID[card.defId];
+    if (def.kind !== 'creature' || !affordable(card)) continue;
+    if (playBlockReason(state, player, card.uid)) continue;
+    const score = creatureScore(def, state, player);
+    if (score > bestScore) {
+      bestScore = score;
+      best = card;
+    }
   }
-  if (best) {
-    return { kind: 'creature', side: side === game.you ? 'foe' : 'you', uid: best.uid };
-  }
-  return { kind: 'hero', side: side === game.you ? 'foe' : 'you' };
+  return best ? { type: 'play', handUid: best.uid, target: null } : null;
 }
 
-/** Play Marina's cards, one at a time, until she can afford nothing useful. */
-export function aiPlayCards(game, skill) {
-  const side = game.foe;
-  let guard = 0;
-  while (guard < 20) {
-    guard += 1;
-    let bestIndex = -1;
-    let bestValue = 0;
-    for (let i = 0; i < side.hand.length; i += 1) {
-      if (!canPlayCard(game, side, i)) continue;
-      const value = handValue(game, side, side.hand[i], skill);
-      if (value > bestValue) {
-        bestValue = value;
-        bestIndex = i;
-      }
-    }
-    if (bestIndex < 0 || bestValue < 8) break;
-    const card = CARD_BY_ID[side.hand[bestIndex]];
-    let target = null;
-    if (card.effect === 'damage3' || card.effect === 'damage4') {
-      target = bestDamageTarget(game, side, card.effect === 'damage3' ? 3 : 4);
-    }
-    if (!playCard(game, side, bestIndex, target)) break;
-    if (game.winner) return;
-  }
-}
+/** The next attack Marina should make, or null when she is done attacking. */
+export function planAttackAction(state, player, style = 'smart') {
+  const foe = other(player);
+  const ready = readyAttackers(state, player);
+  if (ready.length === 0) return null;
+  const enemyBoard = state.players[foe].board;
 
-/**
- * Attack with every ready creature: lethal first, then a trade where the
- * enemy dies and ours lives, then a trade where both die only if ours is
- * weaker, otherwise straight at the lantern. A low-skill Marina sometimes
- * just goes face instead of trading.
- */
-export function aiAttack(game, skill) {
-  const side = game.foe;
-  const foe = game.you;
-  const ready = side.field.filter((c) => c.canAttack);
-  for (const creature of ready) {
-    if (game.winner) return;
-    if (!canAttackWith(game, side, creature.uid)) continue;
-    const lethal = foe.life <= creature.attack;
-    let target = { kind: 'hero', side: 'you' };
-    if (!lethal) {
-      let prey = null;
-      for (const enemy of foe.field) {
-        if (enemy.health <= creature.attack && enemy.attack < creature.health) {
-          if (!prey || enemy.attack > prey.attack) prey = enemy;
-        }
-      }
-      if (prey && skill >= 0.3) {
-        target = { kind: 'creature', side: 'you', uid: prey.uid };
-      } else if (prey && game.rng() < 0.5) {
-        target = { kind: 'creature', side: 'you', uid: prey.uid };
-      }
-    }
-    attack(game, side, creature.uid, target);
+  // Lethal: every ready creature goes to the lantern.
+  if (style === 'smart' && totalAttack(state, player) >= state.players[foe].lantern) {
+    return { type: 'attack', uid: ready[0].uid, target: { type: 'lantern', player: foe } };
   }
-}
 
-/** One full Marina turn: play, then attack. The caller ends the turn after. */
-export function takeAiTurn(game, skill) {
-  aiPlayCards(game, skill);
-  if (!game.winner) aiAttack(game, skill);
+  // Trade up: kill the strongest enemy creature that dies for free.
+  const byAttack = [...ready].sort((a, b) => b.attack - a.attack);
+  for (const attacker of byAttack) {
+    const prey = [...enemyBoard]
+      .filter((defender) => defender.health <= attacker.attack)
+      .filter((defender) => attacker.ranged || defender.attack < attacker.health)
+      .sort((a, b) => b.attack - a.attack)[0];
+    if (prey) {
+      return { type: 'attack', uid: attacker.uid, target: { type: 'creature', player: foe, uid: prey.uid } };
+    }
+  }
+
+  // Nothing trades well: go to the lantern — unless the pilot is dumb.
+  if (style === 'smart') {
+    return { type: 'attack', uid: byAttack[0].uid, target: { type: 'lantern', player: foe } };
+  }
+  return null;
 }

@@ -1,0 +1,238 @@
+/* Lantern Duel — the table. A fixed 1280x800 stage: dark felt, gold trim,
+   and one colour + one glyph per faction, so no faction is told by colour
+   alone. Playable cards glow; creatures that can attack glow gold. */
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #14161d;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #f2ead8;
+}
+
+#stage {
+  position: relative;
+  width: 1280px;
+  height: 800px;
+  margin: 0 auto;
+  background:
+    radial-gradient(ellipse 900px 500px at 50% 38%, #2c3140 0%, #20242e 62%, #191c25 100%);
+  border-left: 2px solid #3a4152;
+  border-right: 2px solid #3a4152;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ---------- bars ---------- */
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 6px 16px;
+  background: #262b38;
+  border-bottom: 1px solid #3a4152;
+  min-height: 64px;
+}
+#my-bar { border-bottom: none; border-top: 1px solid #3a4152; }
+
+.lantern { display: flex; align-items: center; gap: 10px; min-width: 250px; }
+.lantern-icon { font-size: 30px; }
+.lantern-life { font-family: Georgia, serif; font-size: 34px; font-weight: bold; color: #f2ead8; }
+.lantern-bar {
+  width: 90px; height: 12px;
+  background: #14161d; border: 1px solid #3a4152; border-radius: 6px;
+  overflow: hidden;
+}
+.lantern-bar span { display: block; height: 100%; background: linear-gradient(90deg, #e0533d, #f2c94c); }
+.lantern-name { font-family: Georgia, serif; font-size: 14px; color: #a9aec0; max-width: 130px; }
+.lantern.foe { cursor: pointer; }
+.lantern.foe:hover .lantern-life { color: #ff8a70; }
+
+.bar-mid { flex: 1; display: flex; align-items: center; gap: 8px; }
+.pips { letter-spacing: 2px; font-size: 15px; }
+.pip.lit { color: #5aa9e6; text-shadow: 0 0 6px #5aa9e6; }
+.pip.spent { color: #3a4152; }
+.pip.empty { color: #2c3140; }
+.mana-num { font-size: 14px; color: #a9aec0; }
+.bar-right { display: flex; align-items: center; gap: 14px; font-size: 14px; color: #a9aec0; }
+.turn-count { font-weight: bold; color: #e8c15a; }
+
+.foe-hand { display: flex; gap: 0; margin-left: auto; }
+.foe-hand .card.back {
+  width: 34px; height: 48px; margin-left: -18px;
+  background: linear-gradient(160deg, #3a4152, #262b38);
+  border: 1px solid #e0533d;
+}
+.foe-hand .card.back:first-child { margin-left: 0; }
+.foe-hand .card.back .art { font-size: 18px; margin-top: 8px; }
+.foe-hand .card.back .name { display: none; }
+
+/* ---------- boards and hand ---------- */
+.board {
+  flex: 0 0 148px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 8px 16px;
+  border-bottom: 1px dashed #3a4152;
+}
+#my-board { border-bottom: none; }
+.board-empty { color: #6b7284; font-style: italic; font-size: 14px; }
+
+.hand {
+  flex: 0 0 178px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 16px 12px;
+  background: linear-gradient(180deg, transparent, rgba(0, 0, 0, 0.25));
+  overflow-x: auto;
+}
+
+/* ---------- cards ---------- */
+.card {
+  position: relative;
+  width: 108px;
+  height: 150px;
+  border-radius: 10px;
+  border: 2px solid #3a4152;
+  background: #2c3140;
+  color: #f2ead8;
+  padding: 6px 7px;
+  cursor: default;
+  user-select: none;
+  overflow: hidden;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+  flex: 0 0 auto;
+}
+.card.size-board { width: 96px; height: 132px; }
+.card.back { cursor: default; }
+
+.card .cost {
+  position: absolute; top: -7px; left: -7px;
+  width: 30px; height: 30px; border-radius: 50%;
+  background: #5aa9e6; color: #0e1a26;
+  font-weight: bold; font-size: 14px;
+  display: flex; align-items: center; justify-content: center;
+  border: 2px solid #f2ead8;
+}
+.card .faction {
+  display: block; text-align: right;
+  font-size: 11px; font-weight: bold; letter-spacing: 0.5px;
+  text-transform: uppercase; color: #f2ead8;
+}
+.card .art {
+  display: block; text-align: center;
+  font-size: 34px; line-height: 1; height: 38px; overflow: hidden;
+  margin: 2px 0 0;
+  filter: drop-shadow(0 2px 2px rgba(0, 0, 0, 0.5));
+}
+.card.size-board .art { font-size: 26px; height: 30px; }
+.card .name {
+  display: block; text-align: center;
+  font-family: Georgia, serif; font-weight: bold; font-size: 13px;
+  line-height: 1.15; margin-top: 2px;
+}
+.card.size-board .name { font-size: 12px; }
+.card .rules {
+  display: block; text-align: center;
+  font-size: 10.5px; line-height: 1.25; color: #d8d2c2;
+  margin-top: 3px;
+}
+.card.size-board .rules { display: none; }
+.card .stats {
+  position: absolute; left: 6px; right: 6px; bottom: 5px;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.card .stat { font-weight: bold; font-size: 14px; }
+.card .stat.atk { color: #f2c94c; }
+.card .stat.hp { color: #ff8a70; }
+.card .stat.spell-tag {
+  font-size: 11px; letter-spacing: 1px; color: #e8c15a;
+  border: 1px solid #e8c15a; border-radius: 4px; padding: 1px 5px;
+}
+.card .stat.spell-tag { margin: 0 auto; }
+
+/* factions: colour AND glyph */
+.card.fac-ember { border-color: #e0533d; background: linear-gradient(180deg, #3d2320, #2c3140 55%); }
+.card.fac-ember .faction { color: #ff9a86; }
+.card.fac-tide { border-color: #3d8fe0; background: linear-gradient(180deg, #1d2f45, #2c3140 55%); }
+.card.fac-tide .faction { color: #8ec2f5; }
+.card.fac-grove { border-color: #4da34d; background: linear-gradient(180deg, #223d24, #2c3140 55%); }
+.card.fac-grove .faction { color: #93d194; }
+.card.fac-star { border-color: #d9a441; background: linear-gradient(180deg, #453a1c, #2c3140 55%); }
+.card.fac-star .faction { color: #f2cd7e; }
+
+/* states */
+#my-hand .card.playable { cursor: pointer; box-shadow: 0 0 0 2px #e8c15a, 0 0 14px rgba(232, 193, 90, 0.55); }
+#my-hand .card.playable:hover { transform: translateY(-10px); }
+#my-board .card.can-attack { cursor: pointer; box-shadow: 0 0 0 2px #e8c15a, 0 0 14px rgba(232, 193, 90, 0.55); }
+#my-board .card.can-attack:hover { transform: translateY(-6px); }
+.card.selected { box-shadow: 0 0 0 3px #f2ead8, 0 0 18px rgba(242, 234, 216, 0.7); transform: translateY(-8px); }
+.card.sick { filter: saturate(0.45) brightness(0.75); }
+.card.sick::after {
+  content: "💤"; position: absolute; top: 26px; left: 6px; font-size: 14px;
+}
+#foe-board .card { cursor: pointer; }
+#foe-board .card:hover { box-shadow: 0 0 0 2px #e0533d, 0 0 12px rgba(224, 83, 61, 0.5); }
+
+/* ---------- middle bar ---------- */
+#mid-bar {
+  flex: 0 0 64px;
+  display: flex; align-items: center; gap: 16px;
+  padding: 6px 16px;
+  background: #20242e;
+  border-bottom: 1px solid #3a4152;
+}
+.banner { flex: 0 0 430px; font-family: Georgia, serif; font-size: 15px; color: #e8c15a; }
+.log { flex: 1; font-size: 12px; line-height: 1.35; color: #a9aec0; overflow: hidden; max-height: 52px; }
+.log div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+button {
+  font-family: system-ui, sans-serif; font-size: 14px; font-weight: bold;
+  color: #14161d; background: #e8c15a;
+  border: none; border-radius: 8px; padding: 9px 16px; cursor: pointer;
+}
+button:hover { background: #f2cd7e; }
+button:disabled { background: #3a4152; color: #6b7284; cursor: default; }
+#help-btn, #restart-btn { background: #3a4152; color: #f2ead8; padding: 7px 12px; }
+#help-btn:hover, #restart-btn:hover { background: #4a5266; }
+
+/* ---------- overlays ---------- */
+#overlay { display: none; position: absolute; inset: 0; z-index: 10; }
+#overlay.show {
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(16, 18, 24, 0.82);
+}
+.panel {
+  width: 640px; max-height: 740px; overflow-y: auto;
+  background: #262b38; border: 2px solid #e8c15a; border-radius: 16px;
+  padding: 28px 34px; text-align: center;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+}
+.panel h1 { font-family: Georgia, serif; font-size: 46px; margin: 6px 0; color: #e8c15a; }
+.panel .tagline { font-family: Georgia, serif; font-style: italic; font-size: 18px; color: #f2ead8; }
+.panel p { font-size: 15px; line-height: 1.5; color: #d8d2c2; }
+.title-glyph, .end-glyph { font-size: 40px; letter-spacing: 6px; }
+.factions { text-align: left; margin: 14px auto; width: 520px; font-size: 14px; line-height: 1.7; }
+.factions span { display: block; }
+.keys { font-size: 13px; color: #a9aec0; }
+.fine { font-size: 12px; color: #6b7284; }
+.panel button { font-size: 17px; padding: 12px 26px; margin-top: 8px; }
+.end-panel.lost { border-color: #3d8fe0; }
+.end-panel.lost h1 { color: #8ec2f5; }
+
+/* ---------- toast / selftest ---------- */
+#toast {
+  position: absolute; left: 50%; bottom: 190px; transform: translateX(-50%);
+  background: #14161d; border: 1px solid #e8c15a; color: #f2ead8;
+  padding: 8px 16px; border-radius: 8px; font-size: 14px;
+  opacity: 0; pointer-events: none; transition: opacity 0.2s; z-index: 20;
+}
+#toast.show { opacity: 1; }
+#selftest { position: absolute; left: -9999px; top: 0; font-size: 1px; }
