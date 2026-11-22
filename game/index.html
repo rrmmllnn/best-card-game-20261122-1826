@@ -3,12 +3,21 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Lantern Duel — a card duel of four lanterns</title>
-<link rel="stylesheet" href="./styles.css">
+<title>Lantern Duel — a card duel of four factions</title>
+<link rel="stylesheet" href="./src/style.css">
 </head>
 <body>
-<div id="app" aria-label="Lantern Duel card game"></div>
-<p id="status" role="status" aria-live="polite" style="position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;"></p>
+<div id="stage">
+  <header id="foe-bar" class="bar"></header>
+  <div id="foe-board" class="board"></div>
+  <div id="mid-bar"></div>
+  <div id="my-board" class="board"></div>
+  <div id="my-hand" class="hand"></div>
+  <footer id="my-bar" class="bar"></footer>
+  <div id="overlay"></div>
+  <div id="toast" role="status"></div>
+  <div id="selftest" aria-hidden="true"></div>
+</div>
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>
